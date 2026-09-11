@@ -1,0 +1,107 @@
+# MilkBalance — 原奶分离 / 乳脂回配共同边界核算（Julia + Gtk4）
+
+原奶经离心分离为**稀奶油**与**脱脂乳**，再回配形成目标乳脂产品。本应用在工程师确认的
+**同一计算窗口（共同边界）**内，对**进出流量、脂肪检测、罐底残留（持液）、回流**做
+质量 / 脂肪 / 干物质闭合，给出**实际组成区间、未计物流与扩展不确定度（k=2）**。
+
+> 工程边界（刻意不做）：
+> - **不推荐标准化/回配比例**——程序只报告“实际是多少”，不回答“应该怎么配”；
+> - **不控制离心分离机**——没有任何转速/背压/比例写指令，只读计量与实验室结果。
+
+## 技术栈与数据流
+
+```
+现场流量计/密度计镜像 ──► Apache Arrow IPC 表 (data/arrow/<batch>/*.arrow)
+                                   │ register_arrow（read_arrow 或 Arrow→关系注册）
+                                   ▼
+流程拓扑/计量/计算窗口/样品索引 ──► DuckDB (data/milkbalance.duckdb)
+                                   │
+        工程师确认：稳定段、样品时延、罐内持液、量程增益修正
+                                   ▼
+                    核算引擎（区间运算 k=2、残差闭合）
+                                   ├──► Plotly HTML（各支路干物质及脂肪闭合）
+                                   ├──► 文本报告 data/report_S*.txt
+                                   └──► DuckDB branches / closures / flags
+        Gtk4 界面（无显示环境自动回退 CLI）
+```
+
+- Julia 1.11，依赖：`Gtk4`、`DuckDB`、`Arrow`、`DataFrames`、`PlotlyLight`/`JSON3`。
+- 现场镜像**先**转 Arrow 表；流程拓扑（nodes/streams/meters）、计算窗口（windows）、
+  样品索引（samples）、罐持液（holdups）、支路积分（branches）、闭合结论（closures）、
+  质量标记（flags）全部落 DuckDB。
+- Plotly 输出自包含 HTML（plotly.js CDN，离线时页面给出降级提示，数据始终可从 DuckDB 查）。
+
+## 运行
+
+```bash
+# 无头/服务器：跑全部五个测试情景
+julia bin/milkbalance.jl --demo
+
+# 单个情景；S1 工程师确认量程2增益修正 +8%
+julia bin/milkbalance.jl --run S1
+julia bin/milkbalance.jl --run S1 --gain 0.08
+
+# 桌面 Gtk4 界面（需要显示环境；无头时明确报错并提示用 --cli/--demo）
+julia bin/milkbalance.jl --gui
+
+# 测试
+julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+## 物理模型（基线严格闭合）
+
+窗口 0–3600 s，稳定段 300–3300 s。真值流量（kg/h）：
+
+| 支路 | 含义 | 流量 | 脂肪%(湿基) | 干物质% |
+|---|---|---:|---:|---:|
+| raw | 原奶进分离机 | 10000 | 4.000 | 12.60 |
+| cream | 稀奶油→回配罐 | 902.78 | 37.5 | 44.38 |
+| cream_out | 稀奶油出品（外部输出） | 140 | 37.5 | 44.38 |
+| skim | 脱脂乳→回配罐 | 8957.22 | 0.10 | 8.90 |
+| product | 回配产品（外部输出） | 9980 | 3.524 | 12.15 |
+| reflux | 缓冲罐→回配罐 回流 | 120 | 3.524 | 12.15 |
+
+- 分离机：10000 = 902.78 + 140 + 8957.22；脂肪 400 ≈ 338.5+52.5+9。
+- 回配罐：902.78 + 8957.22 + 回流120 = 产品 9980（回流由缓冲罐持液减少 120 kg 平衡）。
+- 全厂：原料 10000 = 产品 9980 + 稀奶油出品 140 + Δ缓冲罐持液(−120) 。
+
+闭合判据：残差 = Σ进 − Σ出 − Δ登记持液；0 ∈ 残差的 k=2 区间即**闭合**；
+边界上有支路缺组成样品时为**组成不全（inconclusive）**，不武断判闭合/未闭合。
+
+## 五个测试情景
+
+| 情景 | 注入问题 | 预期标记与行为 |
+|---|---|---|
+| **S1 奶油量程切换** | 780 s 量程1→2，量程2 未修正增益 +8%；切换瞬态(30 s)样本质量差被剔除 | `range_switch`（信息）+ `gain_unconfirmed`（中，附加 ±2% 仪表不确定度）；分离器质量/脂肪**未闭合**。工程师在 GUI/`--gain 0.08` 确认后全部闭合，`gain_unconfirmed` 消失 |
+| **S2 脱脂乳样晚到** | 结果 4000 s 才到（窗口 3600 s 关闭），工程师不接受时延 | `sample_late` + `missing_stream_composition:skim`；分离器/回配罐脂肪与干物质判**组成不全**并指明支路；质量仍闭合；晚到样品补录且工程师接受后转为闭合 |
+| **S3 回流跨批** | 窗口内 180 kg/h（≈180 kg）回流来自上一批 B-S3p | `reflux_cross_batch`；该回流边按**外部输入**纳入共同边界，全厂与节点全部闭合 |
+| **S4 罐底旧料未登记** | 缓冲罐另有 70 kg 旧料未入账并随回流进产品 | `unregistered_holdup:buf`；未登记持液不进账面平衡，回配罐质量残差 ≈ **−70 kg**、全厂 ≈ **−190 kg** 未计物流浮现；补录(370→180)后闭合 |
+| **S5 干湿基混淆** | 脱脂乳脂肪 0.10%(湿基)=1.12%(干基) 被当湿基录入 | `basis_mixup`（湿基值超过该支路合理上限 0.6%）；分离器/回配罐脂肪**未闭合**（约 ±91 kg），干物质与质量闭合；标记不静默篡改数据 |
+
+标记分三级：高（缺计量/缺组成/未登记/未确认稳定段）、中（量程增益/晚到/干湿基）、信息（量程切换/跨批）。
+
+## 代码结构
+
+| 文件 | 职责 |
+|---|---|
+| `src/types.jl` | 数据模型（IV 区间量、拓扑、计量、镜像、样品、持液、窗口、闭合结果） |
+| `src/intervals.jl` | 区间/不确定度运算（RSS 传播，含0判定） |
+| `src/scenarios.jl` | 五个测试情景与可复现真值镜像生成 |
+| `src/arrowio.jl` | 镜像/样品 ↔ Apache Arrow / DataFrame |
+| `src/engine.jl` | 积分（梯形、量程切换剔除、增益修正）、样品选择/基准核查、节点与全厂闭合 |
+| `src/db.jl` | DuckDB schema、情景/报告持久化、Arrow 关系注册（带版本回退） |
+| `src/plots.jl` | Plotly：支路质量/脂肪/干物质误差棒 + 节点残差区间（0 参考线） |
+| `src/reports.jl` | 中文文本报告与标记释义 |
+| `src/pipeline.jl` | 情景→Arrow→DuckDB→核算→图/报告 端到端 |
+| `src/gui.jl` | Gtk4 界面（Gtk 延迟 require，无头安全） |
+| `bin/milkbalance.jl` | CLI：`--demo` / `--run` / `--gui` |
+| `test/runtests.jl` | 73 项测试：区间运算、五情景标记与闭合前后对比、Arrow/DuckDB、HTML、边界声明 |
+
+## 现场接入替换点
+
+接真实现场数据时，只需替换 `scenarios.jl` 中镜像与样品来源：
+- 把 DCS/流量计算机的流量/密度导出转成与 `mirror_to_frame` 同构的 Arrow 表
+  （列：`t, stream_id, flow_kg_h, density_kg_m3, range_idx, quality`）；
+- 样品在 LIMS 导出后写入 `samples` 表/Arrow（含 `basis=wet|dry`、`taken_at`、`received_at`）；
+- 工程师在 GUI 勾选稳定段、接受/拒绝各样品时延、登记罐持液与量程增益；
+核算引擎、DuckDB schema 与报告无需改动。
