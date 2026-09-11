@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS closures (
     res_solids_x DOUBLE, res_solids_u DOUBLE, status_solids VARCHAR);
 CREATE TABLE IF NOT EXISTS flags (
     batch_id VARCHAR, flag VARCHAR, level VARCHAR);
+CREATE TABLE IF NOT EXISTS analyzer_index (
+    batch_id VARCHAR, stream_id VARCHAR, n_rows BIGINT,
+    arrow_path VARCHAR, t_min DOUBLE, t_max DOUBLE);
+CREATE TABLE IF NOT EXISTS analyzer_points (
+    batch_id VARCHAR, stream_id VARCHAR, sample_id VARCHAR,
+    taken_at DOUBLE, analyzer_t DOUBLE, online_fat DOUBLE, lab_fat DOUBLE,
+    deviation DOUBLE, used BOOLEAN, reasons VARCHAR, tcomp_version INTEGER);
+CREATE TABLE IF NOT EXISTS analyzer_status (
+    batch_id VARCHAR, stream_id VARCHAR, n_used BIGINT, mean_dev DOUBLE,
+    slope_per_h DOUBLE, status VARCHAR, tcomp_versions VARCHAR);
 """
 
 sql_escape(s::AbstractString) = replace(s, "'" => "''")
@@ -51,14 +61,16 @@ end
 
 clear_batch(db, batch) =
     for t in ("nodes","streams","meters","windows","samples","mirror_index",
-              "holdups","branches","closures","flags")
+              "holdups","branches","closures","flags",
+              "analyzer_index","analyzer_points","analyzer_status")
         DuckDB.DBInterface.execute(db,
             "DELETE FROM $t WHERE batch_id = '$(sql_escape(batch))'")
     end
 
 qbool(b) = b ? "TRUE" : "FALSE"
 
-function save_scenario(db, sc::Scenario, arrow_paths::Dict{String,String}=Dict())
+function save_scenario(db, sc::Scenario, arrow_paths::Dict{String,String}=Dict();
+                       analyzer_paths::Dict{String,String}=Dict())
     clear_batch(db, sc.spec.batch_id)
     b = sql_escape(sc.spec.batch_id)
     for n in sc.nodes
@@ -99,6 +111,13 @@ function save_scenario(db, sc::Scenario, arrow_paths::Dict{String,String}=Dict()
             INSERT INTO mirror_index VALUES ('$b','$(sql_escape(sid))',$(length(sub)),
             '$(sql_escape(path))',$(sub[1].t),$(sub[end].t))""")
     end
+    for (sid, path) in analyzer_paths
+        sub = filter(r -> r.stream_id == sid, sc.analyzer_readings)
+        isempty(sub) && continue
+        DuckDB.DBInterface.execute(db, """
+            INSERT INTO analyzer_index VALUES ('$b','$(sql_escape(sid))',$(length(sub)),
+            '$(sql_escape(path))',$(sub[1].t),$(sub[end].t))""")
+    end
     return nothing
 end
 
@@ -124,6 +143,30 @@ function save_report(db, sc::Scenario, rep::WindowReport)
     for f in rep.flags
         DuckDB.DBInterface.execute(db,
             "INSERT INTO flags VALUES ('$b','$(sql_escape(f))','$(flag_level(f))')")
+    end
+    return nothing
+end
+
+"""保存在线脂肪仪偏差复核结果（匹配点 + 校准状态）。
+复核结论与物料闭合分列存储；在线原始读数只在 Arrow 镜像中，不被修改。"""
+function save_review(db, sc::Scenario, rev::AnalyzerReview)
+    b = sql_escape(sc.spec.batch_id)
+    DuckDB.DBInterface.execute(db, "DELETE FROM analyzer_points WHERE batch_id='$b'")
+    DuckDB.DBInterface.execute(db, "DELETE FROM analyzer_status WHERE batch_id='$b'")
+    fnum(x) = isnan(x) ? "NULL" : string(x)
+    for sr in rev.streams
+        for p in sr.points
+            DuckDB.DBInterface.execute(db, """
+                INSERT INTO analyzer_points VALUES ('$b','$(sql_escape(p.stream_id))',
+                '$(sql_escape(p.sample_id))',$(p.taken_at),$(p.analyzer_t),
+                $(fnum(p.online_fat)),$(fnum(p.lab_fat)),$(fnum(p.deviation)),
+                $(qbool(p.used)),'$(sql_escape(join(p.reasons, ";")))',
+                $(p.tcomp_version))""")
+        end
+        DuckDB.DBInterface.execute(db, """
+            INSERT INTO analyzer_status VALUES ('$b','$(sql_escape(sr.stream_id))',
+            $(sr.n_used),$(fnum(sr.mean_dev)),$(fnum(sr.slope_per_h)),
+            '$(string(sr.status))','$(join(sr.tcomp_versions, ","))')""")
     end
     return nothing
 end

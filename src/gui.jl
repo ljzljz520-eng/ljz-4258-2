@@ -34,7 +34,10 @@ function run_gui(; dbpath=joinpath(pwd(), "data", "milkbalance.duckdb"),
     topbar = G.GtkBox(:h); push!(box, topbar)
     push!(topbar, G.GtkLabel("测试情景："))
     combo = G.GtkDropDown(["S1 奶油量程切换", "S2 脱脂乳样晚到",
-                           "S3 回流跨批", "S4 罐底旧料未登记", "S5 干湿基混淆"])
+                           "S3 回流跨批", "S4 罐底旧料未登记", "S5 干湿基混淆",
+                           "S6 非稳态取样(仪)", "S7 清洗后保持旧值(仪)",
+                           "S8 单点超量程(仪)", "S9 温度补偿版本改变(仪)",
+                           "S10 一样跨两流量段(仪)"])
     push!(topbar, combo)
 
     stable_cb = G.GtkCheckButton("工程师确认稳定段")
@@ -63,7 +66,8 @@ function run_gui(; dbpath=joinpath(pwd(), "data", "milkbalance.duckdb"),
     status = G.GtkLabel("就绪。选择情景后点击“计算闭合”。S1 量程2增益修正可在文本框填入（如 0.08）。")
     push!(box, status)
 
-    current_id() = ["S1", "S2", "S3", "S4", "S5"][G.G_.get_selected(combo) + 1]
+    current_id() = ["S1", "S2", "S3", "S4", "S5",
+                    "S6", "S7", "S8", "S9", "S10"][G.G_.get_selected(combo) + 1]
 
     function build_scenario(id)
         sc = scenario(id)
@@ -92,14 +96,18 @@ function run_gui(; dbpath=joinpath(pwd(), "data", "milkbalance.duckdb"),
             db = open_db(dbpath)
             try
                 paths = persist_mirror(sc, outdir)
-                save_scenario(db, shim_batch(sc), paths)
+                apaths = persist_analyzer(sc, outdir)
+                save_scenario(db, shim_batch(sc), paths; analyzer_paths=apaths)
                 rep = reconcile(sc)
                 save_report(db, shim_batch(sc), rep)
-                G.G_.set_text(report_buf, text_report(sc, rep))
+                review = review_analyzers(sc)
+                save_review(db, shim_batch(sc), review)
+                G.G_.set_text(report_buf,
+                              text_report(sc, rep) * analyzer_review_text(review))
                 G.G_.set_text(topo_buf, topology_text(sc))
                 G.G_.set_text(flags_buf, flags_text(rep))
                 pp = joinpath(outdir, "plot_" * sc.spec.batch_id * ".html")
-                write_plot_html(pp, rep; title=sc.title)
+                write_plot_html(pp, rep; title=sc.title, review=review)
                 plot_path[] = pp
                 G.G_.set_text(status, "已写入 DuckDB：$dbpath ；图：$pp")
             finally
@@ -123,11 +131,15 @@ function run_gui(; dbpath=joinpath(pwd(), "data", "milkbalance.duckdb"),
     return win
 end
 
-# 避免额外依赖 ConstructionBases/Setfields：直接重建情景
+# 避免额外依赖 ConstructionBases/Setfields：直接重建情景（保留分析仪数据）
 function SetfieldCompat_set_engineer(sc::Scenario, e::EngineerInputs)
-    return Scenario(sc.id, sc.title, sc.spec, sc.nodes, sc.streams, sc.meters,
-                    sc.mirror, sc.samples, e, sc.reflux_kg, sc.reflux_cross,
-                    sc.expect_flags)
+    return Scenario(; id=sc.id, title=sc.title, spec=sc.spec, nodes=sc.nodes,
+                    streams=sc.streams, meters=sc.meters, mirror=sc.mirror,
+                    samples=sc.samples, engineer=e, reflux_kg=sc.reflux_kg,
+                    reflux_cross=sc.reflux_cross, expect_flags=sc.expect_flags,
+                    analyzer_readings=sc.analyzer_readings,
+                    analyzer_specs=sc.analyzer_specs,
+                    expect_review_flags=sc.expect_review_flags)
 end
 shim_batch(sc) = sc
 

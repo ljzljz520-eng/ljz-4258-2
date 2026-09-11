@@ -69,6 +69,48 @@ function closure_figure(rep::WindowReport)
     return traces, layout
 end
 
+"""图3：在线脂肪仪偏差趋势（在线−实验室，pp），计入点与剔除点分色，
+红色虚线为校准允差带 ±tol。仅展示复核结论，在线原始值不被修正。"""
+function analyzer_figure(rev::AnalyzerReview)
+    traces = Any[]
+    palette = ["#756bb1", "#01665e", "#8c510a", "#08519c"]
+    for (i, sr) in enumerate(rev.streams)
+        isempty(sr.points) && continue
+        color = palette[mod1(i, length(palette))]
+        used = [p for p in sr.points if p.used && !isnan(p.deviation)]
+        excl = [p for p in sr.points if !p.used && !isnan(p.deviation)]
+        push!(traces, Dict("type" => "scatter", "mode" => "lines+markers",
+            "name" => sr.stream_id * " 偏差(计入)",
+            "x" => [p.taken_at for p in used],
+            "y" => [100p.deviation for p in used],
+            "marker" => Dict("color" => color, "size" => 9),
+            "line" => Dict("color" => color)))
+        if !isempty(excl)
+            push!(traces, Dict("type" => "scatter", "mode" => "markers",
+                "name" => sr.stream_id * " 偏差(剔除出统计)",
+                "x" => [p.taken_at for p in excl],
+                "y" => [100p.deviation for p in excl],
+                "text" => [join(p.reasons, ";") for p in excl],
+                "marker" => Dict("color" => "#999999", "size" => 11,
+                                 "symbol" => "x")))
+        end
+        for sgn in (-1, 1)
+            push!(traces, Dict("type" => "scatter", "mode" => "lines",
+                "name" => (sgn > 0 ? "+" : "-") * "允差 " *
+                          string(round(100sr.tol; digits=3)) * " pp",
+                "x" => [sr.points[1].taken_at, sr.points[end].taken_at],
+                "y" => [sgn * 100sr.tol, sgn * 100sr.tol],
+                "showlegend" => i == 1 && sgn > 0,
+                "line" => Dict("color" => "#d62728", "dash" => "dash")))
+        end
+    end
+    layout = Dict("title" => Dict("text" =>
+                      "在线脂肪仪偏差趋势（在线−实验室，仅评估不修正在线值）"),
+                  "xaxis" => Dict("title" => "取样时刻 s"),
+                  "yaxis" => Dict("title" => "偏差 pp", "zeroline" => true))
+    return traces, layout
+end
+
 _html_wrap(traces, layout, divid) = """
 <div id="$divid" style="width:1100px;height:520px"></div>
 <script>
@@ -81,10 +123,18 @@ _html_wrap(traces, layout, divid) = """
 })();
 </script>"""
 
-"""生成自包含 HTML（CDN plotly.js）。"""
-function write_plot_html(path::AbstractString, rep::WindowReport; title::AbstractString="乳脂回配核算")
+"""生成自包含 HTML（CDN plotly.js）。传入 review 时追加在线脂肪仪偏差趋势图。"""
+function write_plot_html(path::AbstractString, rep::WindowReport;
+                         title::AbstractString="乳脂回配核算",
+                         review::Union{Nothing,AnalyzerReview}=nothing)
     t1, l1 = branch_figure(rep)
     t2, l2 = closure_figure(rep)
+    extra = ""
+    if review !== nothing && !isempty(review.streams) &&
+       any(sr -> !isempty(sr.points), review.streams)
+        t3, l3 = analyzer_figure(review)
+        extra = _html_wrap(t3, l3, "analyzer")
+    end
     html = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>$title</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
@@ -94,6 +144,7 @@ function write_plot_html(path::AbstractString, rep::WindowReport; title::Abstrac
 <p>稳定段：$(Int(rep.spec.stable0))–$(Int(rep.spec.stable1)) s，窗口：$(Int(rep.spec.t0))–$(Int(rep.spec.t1)) s</p>
 $(_html_wrap(t1, l1, "branches"))
 $(_html_wrap(t2, l2, "closures"))
+$extra
 </body></html>"""
     write(path, html)
     return path

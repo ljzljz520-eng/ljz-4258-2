@@ -273,5 +273,7 @@ flag_level(f) = startswith(f, "missing_stream") ? "高" :
                 startswith(f, "basis_mixup") ? "中" :
                 startswith(f, "gain_unconfirmed") ? "中" :
                 startswith(f, "sample_late") ? "中" :
+                startswith(f, "analyzer_cal") ? "中" :
+                startswith(f, "analyzer_") ? "信息" :
                 startswith(f, "reflux_cross") ? "信息" :
                 startswith(f, "range_switch") ? "信息" : "中"

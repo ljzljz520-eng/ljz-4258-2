@@ -208,3 +208,195 @@ end
     @test !occursin("推荐比例", r.text)
     @test occursin("不推荐标准化", r.text)
 end
+
+# ---------------- 在线脂肪仪偏差复核 ----------------
+
+review_flags_of(rev) = Set(split(f, ':')[1] for f in rev.flags)
+
+@testset "时延匹配：实验室样对应分析仪历史时刻" begin
+    w = MilkBalance.WindowSpec(0.0, 3600.0, 300.0, 3300.0, "B-T")
+    spec = MilkBalance.AnalyzerSpec("product", 0.08, 120.0, 60.0, 0.001)
+    # 分析仪读数在 t=1000 处阶跃：前 0.030 后 0.040
+    rdgs = [MilkBalance.AnalyzerReading(Float64(t), "product",
+                                        t < 1000 ? 0.030 : 0.040, 20.0,
+                                        MilkBalance.q_good, 1) for t in 0:10:3600]
+    s1 = MilkBalance.LabSample("product_1050", "product", 1050.0, 2000.0,
+                               0.040, 0.1215, MilkBalance.wet, true)
+    p1 = MilkBalance.match_sample_to_analyzer(s1, spec, rdgs,
+                                              Tuple{Float64,Float64}[], Float64[], w)
+    @test p1.analyzer_t == 930.0            # 1050 - 120 s 样品时延
+    @test p1.online_fat ≈ 0.030             # 匹配到阶跃前的读数，证明时延生效
+    @test p1.deviation ≈ -0.010
+    @test p1.used
+    s2 = MilkBalance.LabSample("product_1200", "product", 1200.0, 2000.0,
+                               0.040, 0.1215, MilkBalance.wet, true)
+    p2 = MilkBalance.match_sample_to_analyzer(s2, spec, rdgs,
+                                              Tuple{Float64,Float64}[], Float64[], w)
+    @test p2.online_fat ≈ 0.040
+    @test p2.deviation ≈ 0.0 atol=1e-12
+end
+
+@testset "冻结段自检：未打 q_stale 标记的恒值保持也能识别" begin
+    rdgs = [MilkBalance.AnalyzerReading(Float64(t), "product",
+                                        200 <= t <= 300 ? 0.0357 :
+                                            0.03524 + 0.0001 * sin(t),
+                                        20.0, MilkBalance.q_good, 1) for t in 0:10:3600]
+    ranges = MilkBalance.detect_stale_runs(rdgs)
+    @test any(r -> r[1] <= 250 <= r[2], ranges)
+    # 正常噪声段不误判
+    @test !any(r -> r[1] <= 1500 <= r[2] && r[2] - r[1] > 50, ranges)
+end
+
+@testset "超量程：读数超量程上限即剔除（无质量标记也生效）" begin
+    w = MilkBalance.WindowSpec(0.0, 3600.0, 300.0, 3300.0, "B-T")
+    spec = MilkBalance.AnalyzerSpec("product", 0.08, 120.0, 60.0, 0.001)
+    base = [MilkBalance.AnalyzerReading(Float64(t), "product", 0.0355, 20.0,
+                                        MilkBalance.q_good, 1) for t in 0:10:3600]
+    # 1680 s 单点冲到 0.12（> 量程 0.08），质量标记仍为 good
+    rdgs = [r.t == 1680.0 ?
+            MilkBalance.AnalyzerReading(r.t, r.stream_id, 0.12, r.temp_c,
+                                        MilkBalance.q_good, 1) : r for r in base]
+    s = MilkBalance.LabSample("product_1800", "product", 1800.0, 2700.0,
+                              0.03524, 0.1215, MilkBalance.wet, true)
+    p = MilkBalance.match_sample_to_analyzer(s, spec, rdgs,
+                                             Tuple{Float64,Float64}[], Float64[], w)
+    @test p.used
+    @test any(startswith("overrange_excluded"), p.reasons)
+    @test p.online_fat ≈ 0.0355             # 未被 0.12 拉高
+end
+
+@testset "流量段边界检测：量程切换成边界，平稳支路无边界" begin
+    sc = scenario("S10")
+    b = MilkBalance.flow_segment_boundaries(sc.mirror, "cream")
+    @test 780.0 in b
+    @test isempty(MilkBalance.flow_segment_boundaries(sc.mirror, "raw"))
+end
+
+@testset "S6 实验室样取在非稳态：展示偏差但不计入校准统计" begin
+    r = MilkBalance.run_scenario("S6"; outdir=TMP, dbpath=joinpath(TMP, "s6.duckdb"))
+    rev = r.review
+    @test "analyzer_nonsteady_sample" in review_flags_of(rev)
+    sr = rev.streams[1]
+    p_non = sr.points[findfirst(p -> p.taken_at == 150.0, sr.points)]
+    @test !p_non.used && !isnan(p_non.deviation)     # 非稳态点仍展示偏差
+    @test "nonsteady_sample" in p_non.reasons
+    p_ok = sr.points[findfirst(p -> p.taken_at == 1800.0, sr.points)]
+    @test p_ok.used
+    @test sr.n_used == 1
+    @test sr.status === MilkBalance.cal_ok
+    @test r.report.total.status_mass === MilkBalance.closed   # 物料闭合不受影响
+end
+
+@testset "S7 分析仪清洗后保持旧值：冻结窗无法匹配" begin
+    r = MilkBalance.run_scenario("S7"; outdir=TMP, dbpath=joinpath(TMP, "s7.duckdb"))
+    rev = r.review
+    @test "analyzer_stale_hold" in review_flags_of(rev)
+    sr = rev.streams[1]
+    p = sr.points[findfirst(p -> p.taken_at == 2550.0, sr.points)]
+    @test !p.used && isnan(p.deviation)
+    @test "stale_hold" in p.reasons
+    p_ok = sr.points[findfirst(p -> p.taken_at == 1800.0, sr.points)]
+    @test p_ok.used
+    @test sr.n_used == 1
+    @test sr.status === MilkBalance.cal_ok
+end
+
+@testset "S8 单点超量程：剔除单点，窗内其余读数仍参与匹配" begin
+    r = MilkBalance.run_scenario("S8"; outdir=TMP, dbpath=joinpath(TMP, "s8.duckdb"))
+    rev = r.review
+    @test "analyzer_overrange_excluded" in review_flags_of(rev)
+    sr = rev.streams[1]
+    p = sr.points[findfirst(p -> p.taken_at == 1800.0, sr.points)]
+    @test p.used
+    @test any(startswith("overrange_excluded"), p.reasons)
+    @test p.online_fat ≈ 0.03524 + 0.0005 atol=0.0004   # 未被超量程点拉高
+    @test sr.status === MilkBalance.cal_ok
+end
+
+@testset "S9 温度补偿版本改变：分组评估，版本间差异触发校准可疑" begin
+    r = MilkBalance.run_scenario("S9"; outdir=TMP, dbpath=joinpath(TMP, "s9.duckdb"))
+    rev = r.review
+    fl = review_flags_of(rev)
+    @test "analyzer_tcomp_change" in fl
+    @test "analyzer_cal_suspect" in fl
+    sr = rev.streams[1]
+    @test sr.status === MilkBalance.cal_suspect
+    @test sr.tcomp_versions == [1, 2]
+    @test sr.version_mean_dev[1] > 0 && sr.version_mean_dev[2] < 0
+    @test abs(sr.version_mean_dev[1] - sr.version_mean_dev[2]) > 0.001
+    @test r.report.total.status_mass === MilkBalance.closed
+end
+
+@testset "S10 一只样对应两个流量段：跨段点剔除出统计" begin
+    r = MilkBalance.run_scenario("S10"; outdir=TMP, dbpath=joinpath(TMP, "s10.duckdb"))
+    rev = r.review
+    @test "analyzer_spans_flow_segments" in review_flags_of(rev)
+    sr = rev.streams[1]
+    p = sr.points[findfirst(p -> p.taken_at == 900.0, sr.points)]
+    @test !p.used
+    @test "spans_flow_segments" in p.reasons
+    @test p.analyzer_t == 780.0               # 时延回推正好落在量程切换点
+    p2 = sr.points[findfirst(p -> p.taken_at == 1500.0, sr.points)]
+    @test p2.used
+    @test sr.n_used == 1
+    @test r.report.total.status_mass === MilkBalance.closed
+    @test "range_switch" in flags_of(r.report)
+end
+
+@testset "偏差复核不修正在线原始值、不进入物料闭合" begin
+    sc = scenario("S8")
+    before = deepcopy(sc.analyzer_readings)
+    rev = MilkBalance.review_analyzers(sc)
+    @test all(sc.analyzer_readings .== before)          # 在线读数未被改写
+    rep = MilkBalance.reconcile(sc)
+    @test rep.total.status_mass === MilkBalance.closed
+    @test !any(startswith(f, "analyzer_") for f in rep.flags)   # 闭合标记不受复核影响
+    @test any(startswith(f, "analyzer_") for f in rev.flags)
+    r = MilkBalance.run_scenario("S8"; outdir=TMP, dbpath=joinpath(TMP, "s8b.duckdb"))
+    @test occursin("在线脂肪仪偏差复核", r.text)
+    @test occursin("不自动修正", r.text)
+    # 无分析仪的情景不出现复核段
+    r1 = MilkBalance.run_scenario("S1"; outdir=TMP, dbpath=joinpath(TMP, "s1c.duckdb"))
+    @test !occursin("在线脂肪仪偏差复核", r1.text)
+end
+
+@testset "复核结果 DuckDB 持久化与 Arrow 往返" begin
+    path = joinpath(TMP, "review.duckdb")
+    r = MilkBalance.run_scenario("S8"; outdir=TMP, dbpath=path)
+    db = MilkBalance.open_db(path)
+    st = DataFrame(MilkBalance.DuckDB.DBInterface.execute(db,
+        "SELECT status, n_used FROM analyzer_status WHERE batch_id='B-S8'"))
+    @test st.status[1] == "cal_ok"
+    @test st.n_used[1] == 1
+    pt = DataFrame(MilkBalance.DuckDB.DBInterface.execute(db,
+        "SELECT used, reasons FROM analyzer_points WHERE batch_id='B-S8'"))
+    @test size(pt, 1) == 1
+    @test pt.used[1] == true
+    @test occursin("overrange_excluded", pt.reasons[1])
+    idx = DataFrame(MilkBalance.DuckDB.DBInterface.execute(db,
+        "SELECT stream_id, arrow_path, n_rows FROM analyzer_index WHERE batch_id='B-S8'"))
+    @test idx.stream_id[1] == "product"
+    back = MilkBalance.frame_to_analyzer(MilkBalance.read_arrow(idx.arrow_path[1]))
+    @test length(back) == 361
+    @test count(x -> x.quality == MilkBalance.q_overrange, back) == 1
+    MilkBalance.DuckDB.DBInterface.close!(db)
+end
+
+@testset "复核偏差趋势图写入 HTML（无头可运行）" begin
+    r = MilkBalance.run_scenario("S6"; outdir=TMP, dbpath=joinpath(TMP, "s6p.duckdb"))
+    html = read(r.html, String)
+    @test occursin("偏差趋势", html)
+    @test occursin("analyzer", html)
+end
+
+@testset "S6..S10 期望复核标记自检" begin
+    for id in ("S6", "S7", "S8", "S9", "S10")
+        r = MilkBalance.run_scenario(id; outdir=TMP,
+                                     dbpath=joinpath(TMP, "exp_$id.duckdb"))
+        ok, miss, _ = MilkBalance.expect_review_flags_present(
+            r.review, r.scenario.expect_review_flags)
+        @test ok
+        okb, _, _ = MilkBalance.expect_flags_present(r.report, r.scenario.expect_flags)
+        @test okb
+    end
+end

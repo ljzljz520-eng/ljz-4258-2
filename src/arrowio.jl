@@ -38,7 +38,8 @@ read_arrow(path::AbstractString) = DataFrame(Arrow.Table(path))
 """镜像帧 -> 采样向量。"""
 function frame_to_mirror(df::AbstractDataFrame)
     qmap = Dict("good" => q_good, "range_switch" => q_range_switch,
-                "stale" => q_stale, "missing" => q_missing)
+                "stale" => q_stale, "missing" => q_missing,
+                "overrange" => q_overrange)
     [FlowMirrorSample(row.t, row.stream_id, row.flow_kg_h, row.density_kg_m3,
                       Int(row.range_idx), get(qmap, String(row.quality), q_good))
      for row in eachrow(df)]
@@ -48,5 +49,27 @@ end
 function frame_to_samples(df::AbstractDataFrame)
     [LabSample(row.id, row.stream_id, row.taken_at, row.received_at, row.fat,
                row.solids, String(row.basis) == "dry" ? dry : wet, Bool(row.delay_ok))
+     for row in eachrow(df)]
+end
+
+"""在线脂肪仪读数 -> DataFrame（原始值，不做任何修正）。"""
+function analyzer_to_frame(rs::AbstractVector{AnalyzerReading})
+    DataFrame(
+        t = Float64[r.t for r in rs],
+        stream_id = String[r.stream_id for r in rs],
+        fat_pct = Float64[r.fat_pct for r in rs],
+        temp_c = Float64[r.temp_c for r in rs],
+        quality = String[replace(string(r.quality), "q_" => "") for r in rs],
+        tcomp_version = Int32[r.tcomp_version for r in rs],
+    )
+end
+
+"""帧 -> 在线脂肪仪读数向量。"""
+function frame_to_analyzer(df::AbstractDataFrame)
+    qmap = Dict("good" => q_good, "range_switch" => q_range_switch,
+                "stale" => q_stale, "missing" => q_missing,
+                "overrange" => q_overrange)
+    [AnalyzerReading(row.t, row.stream_id, row.fat_pct, row.temp_c,
+                     get(qmap, String(row.quality), q_good), Int(row.tcomp_version))
      for row in eachrow(df)]
 end

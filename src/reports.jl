@@ -92,10 +92,70 @@ const FLAG_TEXT = Dict(
     "low_coverage" => "窗口内有效积分覆盖低于 98%",
     "unstable_window" => "工程师未确认稳定段或窗口参数非法",
     "no_product_composition" => "无产品组成，无法给出实际组成区间",
+    "analyzer_nonsteady_sample" => "实验室样取在非稳态：偏差点仅展示，不计入趋势/校准统计",
+    "analyzer_stale_hold" => "分析仪清洗后保持旧值：匹配窗内读数冻结，该点无法匹配",
+    "analyzer_overrange_excluded" => "匹配窗内超量程读数已剔除，其余有效读数仍参与匹配",
+    "analyzer_spans_flow_segments" => "样品时延匹配窗跨流量段边界，该点不计入校准统计",
+    "analyzer_tcomp_change" => "样品温度补偿版本发生改变：偏差按版本分组评估",
+    "analyzer_tcomp_mixed" => "匹配窗内温度补偿版本混合，该点不计入校准统计",
+    "analyzer_no_match" => "匹配窗内无有效在线读数",
+    "analyzer_cal_suspect" => "在线脂肪仪偏差超校准允差，请安排校准复核（不自动修正在线值）",
+    "analyzer_cal_drift" => "在线脂肪仪偏差趋势漂移超允差，请安排校准复核（不自动修正在线值）",
+    "analyzer_cal_insufficient" => "有效偏差点不足，无法评估校准状态",
 )
 
 explain_flag(f) = begin
     base = split(f, ':')[1]
     txt = get(FLAG_TEXT, base, f)
     return startswith(f, base * ":") ? txt * "（" * join(split(f, ':')[2:end], ":") * "）" : txt
+end
+
+# ---------------- 在线脂肪仪偏差复核文本 ----------------
+
+const CAL_TEXT = Dict(cal_ok => "正常", cal_suspect => "偏差可疑",
+                      cal_drift => "趋势漂移", cal_insufficient => "数据不足")
+
+"""偏差复核文本段：时延匹配明细、偏差趋势与校准状态。
+明确声明：不自动修正、不回写任何在线原始值，复核不进入物料闭合。"""
+function analyzer_review_text(rev::AnalyzerReview)
+    isempty(rev.streams) && return ""
+    io = IOBuffer()
+    println(io)
+    println(io, "-- 在线脂肪仪偏差复核（时延匹配，仅评估不修正在线原始值） --")
+    for sr in rev.streams
+        @printf(io, "分析仪[%s] 校准状态: %s", sr.stream_id, CAL_TEXT[sr.status])
+        if sr.n_used > 0
+            @printf(io, "  计入 %d 点  平均偏差 %+.3f pp", sr.n_used, 100sr.mean_dev)
+            isnan(sr.slope_per_h) ||
+                @printf(io, "  趋势 %+.3f pp/h", sr.slope_per_h)
+        else
+            print(io, "  无计入点")
+        end
+        if length(sr.tcomp_versions) > 1
+            print(io, "\n    温度补偿版本: ", join(sr.tcomp_versions, "/"), " 分组偏差: ")
+            for (k, v) in sort!(collect(sr.version_mean_dev))
+                @printf(io, "v%d %+.3f pp  ", k, 100v)
+            end
+        end
+        println(io)
+        for p in sr.points
+            tag = p.used ? "计入" : "剔除"
+            if isnan(p.deviation)
+                @printf(io, "    样 %-14s 取%5.0fs→仪%5.0fs  无法匹配在线值  [%s] %s\n",
+                        p.sample_id, p.taken_at, p.analyzer_t, tag,
+                        join(p.reasons, ","))
+            else
+                @printf(io, "    样 %-14s 取%5.0fs→仪%5.0fs  在线 %.3f%%  实验 %.3f%%  偏差 %+.3f pp  [%s]%s\n",
+                        p.sample_id, p.taken_at, p.analyzer_t,
+                        100p.online_fat, 100p.lab_fat, 100p.deviation, tag,
+                        isempty(p.reasons) ? "" : " " * join(p.reasons, ","))
+            end
+        end
+        for f in sr.flags
+            @printf(io, "    [%s] %s\n", flag_level(f), explain_flag(f))
+        end
+    end
+    println(io, "说明：偏差=在线−实验室；复核结果不进入物料闭合，")
+    println(io, "      程序不自动修正、不回写任何在线原始读数。")
+    return String(take!(io))
 end

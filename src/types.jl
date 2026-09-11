@@ -5,7 +5,7 @@
 @enum NodeKind tank_source separator blend tank_buffer outlet
 
 """计量数据质量标记。"""
-@enum Quality q_good q_range_switch q_stale q_missing
+@enum Quality q_good q_range_switch q_stale q_missing q_overrange
 
 """脂肪基准：湿基(wet, 脂肪/全样) 或 干基(dry, 脂肪/干物质)。"""
 @enum FatBasis wet dry
@@ -146,4 +146,65 @@ end
     missing_streams::Vector{String}  # 未计物流
     compositions_used::Dict{String,LabSample}
     stable::Bool
+end
+
+# ---------------- 在线脂肪仪偏差复核 ----------------
+# 工程边界：偏差复核只做“在线值 vs 同期实验室值”的比对、趋势与校准状态评估；
+# 程序不自动修正、不回写任何在线原始读数，复核结果也不进入物料闭合。
+
+@kwdef struct AnalyzerReading
+    """在线脂肪仪镜像采样（先落 Apache Arrow，再供复核读取）。"""
+    t::Float64                  # 相对窗口起点的秒
+    stream_id::String
+    fat_pct::Float64            # 在线脂肪读数（湿基质量分数，原始值，不做任何修正）
+    temp_c::Float64             # 样品温度
+    quality::Quality            # q_good / q_stale(清洗后保持旧值) / q_overrange / q_missing
+    tcomp_version::Int          # 样品温度补偿算法版本
+end
+
+@kwdef struct AnalyzerSpec
+    """一台在线脂肪仪的计量规格与复核参数（工程师登记）。"""
+    stream_id::String
+    range_max::Float64          # 仪表认证量程上限（湿基脂肪分数），超出即超量程
+    transport_delay::Float64    # 样品时延(s)：分析仪在取样口上游，实验室样对应 t_取样-时延
+    match_halfwin::Float64      # 匹配半窗(s)：在对应时刻前后各取该宽度求在线均值
+    tol::Float64                # 校准允差（绝对，湿基脂肪分数，k=2 量级）
+end
+
+"""校准状态：正常 / 偏差可疑 / 趋势漂移 / 数据不足。"""
+@enum CalStatus cal_ok cal_suspect cal_drift cal_insufficient
+
+@kwdef struct DeviationPoint
+    """一只实验室样与在线读数的时延匹配结果（仅展示，不回写）。"""
+    sample_id::String
+    stream_id::String
+    taken_at::Float64           # 取样时刻(s)
+    analyzer_t::Float64         # 对应分析仪时刻 = taken_at - 样品时延
+    online_fat::Float64         # 匹配窗内有效在线均值（无法匹配为 NaN）
+    lab_fat::Float64            # 实验室湿基脂肪
+    deviation::Float64          # 在线 − 实验室（无法匹配为 NaN）
+    used::Bool                  # 是否计入偏差趋势/校准统计
+    reasons::Vector{String}     # 排除或提示原因（非稳态/保持旧值/超量程/跨流量段/补偿版本混合）
+    tcomp_version::Int          # 匹配所用温度补偿版本（无法匹配为 0）
+end
+
+@kwdef struct AnalyzerStreamReview
+    """一台分析仪的偏差趋势与校准状态结论。"""
+    stream_id::String
+    points::Vector{DeviationPoint}
+    n_used::Int
+    mean_dev::Float64           # 计入点的平均偏差（在线−实验室）
+    slope_per_h::Float64        # 偏差趋势斜率（每小时），点数不足为 NaN
+    status::CalStatus
+    tcomp_versions::Vector{Int} # 计入点出现的温度补偿版本
+    version_mean_dev::Dict{Int,Float64}  # 各版本各自的平均偏差
+    tol::Float64                # 校准允差（绝对，湿基脂肪分数）
+    flags::Vector{String}
+end
+
+@kwdef struct AnalyzerReview
+    """整批在线脂肪仪偏差复核结果；不进入物料闭合，不修正在线原始值。"""
+    batch_id::String
+    streams::Vector{AnalyzerStreamReview}
+    flags::Vector{String}
 end

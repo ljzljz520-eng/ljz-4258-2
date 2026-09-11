@@ -164,7 +164,16 @@ default_engineer(; gains=Dict{Tuple{String,Int},Float64}(),
     reflux_kg::Float64 = 0.0
     reflux_cross::Bool = false
     expect_flags::Vector{String} = String[]
+    analyzer_readings::Vector{AnalyzerReading} = AnalyzerReading[]
+    analyzer_specs::Vector{AnalyzerSpec} = AnalyzerSpec[]
+    expect_review_flags::Vector{String} = String[]
 end
+
+# 兼容 12 参数位置构造（不含在线分析仪扩展字段）
+Scenario(id, title, spec, nodes, streams, meters, mirror, samples, engineer,
+         reflux_kg, reflux_cross, expect_flags) =
+    Scenario(; id, title, spec, nodes, streams, meters, mirror, samples, engineer,
+             reflux_kg, reflux_cross, expect_flags)
 
 _all_mirror(; reflux_scale=1.0, product_scale=1.0, cream_switch=nothing, seed_extra="") =
     vcat(gen_mirror("raw"; seed="raw" * seed_extra),
@@ -277,7 +286,158 @@ function scenario(id::AbstractString)
     id == "S3" && return scenario_reflux_cross()
     id == "S4" && return scenario_old_bottom()
     id == "S5" && return scenario_basis_mixup()
-    error("未知情景 $id（可选 S1..S5）")
+    id == "S6" && return scenario_analyzer_nonsteady()
+    id == "S7" && return scenario_analyzer_stale()
+    id == "S8" && return scenario_analyzer_overrange()
+    id == "S9" && return scenario_analyzer_tcomp()
+    id == "S10" && return scenario_analyzer_two_segments()
+    error("未知情景 $id（可选 S1..S10）")
 end
 all_scenarios() = [scenario_cream_switch(), scenario_skim_late(), scenario_reflux_cross(),
-                   scenario_old_bottom(), scenario_basis_mixup()]
+                   scenario_old_bottom(), scenario_basis_mixup(),
+                   scenario_analyzer_nonsteady(), scenario_analyzer_stale(),
+                   scenario_analyzer_overrange(), scenario_analyzer_tcomp(),
+                   scenario_analyzer_two_segments()]
+
+# ---------------- 在线脂肪仪偏差复核情景（S6..S10） ----------------
+# 复核只比对“在线值 vs 同期实验室值”，不修正在线原始值、不进入物料闭合；
+# 因此下列情景的物料/脂肪平衡均为基线严格闭合，差异全部在分析仪侧。
+
+const ANALYZER_DT = 10.0
+
+"""生成在线脂肪仪镜像（湿基脂肪分数）。
+- bias：固定系统偏差；noise：随机噪声幅度；
+- stale_ranges：[(t0,t1,hold)] 清洗后保持旧值区间，读数冻结为 hold 并打 q_stale；
+- overrange_at：超量程时刻表，读数冲至 range_max 之上并打 q_overrange；
+- tcomp_switch=(ts, extra_bias)：ts 起温度补偿版本 1→2，并叠加额外偏差。"""
+function gen_analyzer(stream_id::String; bias::Real=0.0, noise::Real=0.0002,
+                      seed::String=stream_id * "_an",
+                      stale_ranges::Vector{Tuple{Float64,Float64,Float64}}=Tuple{Float64,Float64,Float64}[],
+                      overrange_at::Vector{Float64}=Float64[],
+                      overrange_to::Real=0.12,
+                      tcomp_switch::Union{Nothing,Tuple{Float64,Float64}}=nothing)
+    out = AnalyzerReading[]
+    for (i, t) in enumerate(T0:ANALYZER_DT:T1)
+        ver = 1
+        b = bias
+        if tcomp_switch !== nothing && t >= tcomp_switch[1]
+            ver = 2
+            b += tcomp_switch[2]
+        end
+        v = TRUE_FAT[stream_id] + b + noise * 2 * _pn(seed, i)
+        q = q_good
+        for (a, bb, hold) in stale_ranges
+            if a <= t <= bb
+                v = hold
+                q = q_stale
+            end
+        end
+        if t in overrange_at
+            v = overrange_to
+            q = q_overrange
+        end
+        temp = 20.0 + 2.0 * 2 * _pn(seed * "_t", i)
+        push!(out, AnalyzerReading(t, stream_id, v, temp, q, ver))
+    end
+    return out
+end
+
+product_analyzer_spec(; tol=0.0010) =
+    AnalyzerSpec("product", 0.08, 120.0, 60.0, tol)
+
+"""情景6：实验室样取在非稳态——产品样 150 s（稳定段 300 s 之前）取样，
+时延匹配仍给出偏差展示，但该点不计入趋势/校准统计。"""
+function scenario_analyzer_nonsteady()
+    topo = default_topology()
+    mirror = _all_mirror(; seed_extra="_s6")
+    samples = [default_samples(); lab_sample("product", 150, 900)]
+    Scenario(; id="S6", title="在线脂肪仪复核：实验室样取在非稳态（展示但不计入校准统计）",
+             spec=default_window("B-S6"), nodes=topo.nodes, streams=topo.streams,
+             meters=default_meters(), mirror=mirror, samples=samples,
+             engineer=default_engineer(), reflux_kg=120.0,
+             analyzer_readings=gen_analyzer("product"; bias=0.0005, seed="prod_s6"),
+             analyzer_specs=[product_analyzer_spec()],
+             expect_review_flags=["analyzer_nonsteady_sample"])
+end
+
+"""情景7：分析仪清洗后保持旧值——2380..2620 s 读数冻结（q_stale），
+2550 s 实验室样的匹配窗全部落在冻结段，该点无法匹配，不计入统计。"""
+function scenario_analyzer_stale()
+    topo = default_topology()
+    mirror = _all_mirror(; seed_extra="_s7")
+    samples = [default_samples(); lab_sample("product", 2550, 3000)]
+    rdgs = gen_analyzer("product"; bias=0.0005, seed="prod_s7",
+                        stale_ranges=[(2360.0, 2620.0, 0.03570)])
+    Scenario(; id="S7", title="在线脂肪仪复核：清洗后保持旧值，匹配窗全冻结则该点剔除",
+             spec=default_window("B-S7"), nodes=topo.nodes, streams=topo.streams,
+             meters=default_meters(), mirror=mirror, samples=samples,
+             engineer=default_engineer(), reflux_kg=120.0,
+             analyzer_readings=rdgs, analyzer_specs=[product_analyzer_spec()],
+             expect_review_flags=["analyzer_stale_hold"])
+end
+
+"""情景8：单点超量程——1700 s 一点读数冲出量程（0.12 > 0.08），
+该点剔除后用窗内其余有效读数求均值，匹配点仍计入统计。"""
+function scenario_analyzer_overrange()
+    topo = default_topology()
+    mirror = _all_mirror(; seed_extra="_s8")
+    rdgs = gen_analyzer("product"; bias=0.0005, seed="prod_s8",
+                        overrange_at=[1700.0])
+    Scenario(; id="S8", title="在线脂肪仪复核：单点超量程剔除，窗内其余读数仍可用",
+             spec=default_window("B-S8"), nodes=topo.nodes, streams=topo.streams,
+             meters=default_meters(), mirror=mirror, samples=default_samples(),
+             engineer=default_engineer(), reflux_kg=120.0,
+             analyzer_readings=rdgs, analyzer_specs=[product_analyzer_spec()],
+             expect_review_flags=["analyzer_overrange_excluded"])
+end
+
+"""情景9：样品温度补偿版本改变——2000 s 起 v1→v2 且叠加 -0.0015 偏差，
+按版本分组统计偏差，版本间差异超允差则校准状态可疑。"""
+function scenario_analyzer_tcomp()
+    topo = default_topology()
+    mirror = _all_mirror(; seed_extra="_s9")
+    samples = LabSample[
+        lab_sample("raw", 900, 1800),
+        lab_sample("skim", 1200, 2100),
+        lab_sample("cream", 1500, 2400),
+        lab_sample("cream_out", 1600, 2500),
+        lab_sample("product", 1500, 2400),
+        lab_sample("product", 2500, 3200),
+        lab_sample("reflux", 2000, 2800),
+    ]
+    rdgs = gen_analyzer("product"; bias=0.0008, seed="prod_s9",
+                        tcomp_switch=(2000.0, -0.0015))
+    Scenario(; id="S9", title="在线脂肪仪复核：温度补偿版本切换，分组偏差超允差",
+             spec=default_window("B-S9"), nodes=topo.nodes, streams=topo.streams,
+             meters=default_meters(), mirror=mirror, samples=samples,
+             engineer=default_engineer(), reflux_kg=120.0,
+             analyzer_readings=rdgs, analyzer_specs=[product_analyzer_spec()],
+             expect_review_flags=["analyzer_tcomp_change", "analyzer_cal_suspect"])
+end
+
+"""情景10：一只样对应两个流量段——奶油支路 780 s 量程切换（增益 0 且工程师已确认），
+900 s 取的奶油样经时延回推正好跨流量段边界，该点不计入校准统计。"""
+function scenario_analyzer_two_segments()
+    topo = default_topology()
+    mirror = _all_mirror(; cream_switch=(780.0, 30.0, 0.0), seed_extra="_s10")
+    samples = LabSample[
+        lab_sample("raw", 900, 1800),
+        lab_sample("skim", 1200, 2100),
+        lab_sample("cream", 900, 1800),    # 时延 120 s -> 对应分析仪 780 s，跨流量段
+        lab_sample("cream", 1500, 2400),
+        lab_sample("cream_out", 1600, 2500),
+        lab_sample("product", 1800, 2700),
+        lab_sample("reflux", 2000, 2800),
+    ]
+    eng = default_engineer(; gains=Dict{Tuple{String,Int},Float64}(("cream", 2) => 0.0))
+    cream_spec = AnalyzerSpec("cream", 0.60, 120.0, 60.0, 0.0040)
+    Scenario(; id="S10", title="在线脂肪仪复核：一只样对应两个流量段，该点剔除出统计",
+             spec=default_window("B-S10"), nodes=topo.nodes, streams=topo.streams,
+             meters=default_meters(), mirror=mirror, samples=samples,
+             engineer=eng, reflux_kg=120.0,
+             analyzer_readings=gen_analyzer("cream"; bias=0.0020, noise=0.0008,
+                                            seed="cream_s10"),
+             analyzer_specs=[cream_spec],
+             expect_flags=["range_switch"],
+             expect_review_flags=["analyzer_spans_flow_segments"])
+end

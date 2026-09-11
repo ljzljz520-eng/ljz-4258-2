@@ -24,6 +24,7 @@ include("intervals.jl")
 include("scenarios.jl")
 include("arrowio.jl")
 include("engine.jl")
+include("analyzer.jl")
 include("db.jl")
 include("plots.jl")
 include("reports.jl")
@@ -34,13 +35,19 @@ export IV, lo, hi, contains0, compmass, composition,
        Node, NodeKind, Stream, MeterSpec, FlowMirrorSample, LabSample, FatBasis,
        ClosureStatus, Quality, TankHoldup, WindowSpec, EngineerInputs, RangeState,
        BranchMass, NodeClosure, WindowReport, Scenario,
+       AnalyzerReading, AnalyzerSpec, DeviationPoint, CalStatus,
+       AnalyzerStreamReview, AnalyzerReview,
        scenario, all_scenarios,
        reconcile, integrate_mass, branch_masses,
-       mirror_to_frame, samples_to_frame, write_arrow, read_arrow,
-       frame_to_mirror, frame_to_samples,
-       open_db, save_scenario, save_report, register_arrow, list_batches,
-       write_plot_html, text_report, flag_level, explain_flag,
-       persist_mirror, run_scenario, expect_flags_present,
+       review_analyzers, match_sample_to_analyzer,
+       detect_stale_runs, flow_segment_boundaries,
+       mirror_to_frame, samples_to_frame, analyzer_to_frame, write_arrow, read_arrow,
+       frame_to_mirror, frame_to_samples, frame_to_analyzer,
+       open_db, save_scenario, save_report, save_review, register_arrow, list_batches,
+       write_plot_html, analyzer_figure, text_report, analyzer_review_text,
+       flag_level, explain_flag,
+       persist_mirror, persist_analyzer, run_scenario,
+       expect_flags_present, expect_review_flags_present,
        run_gui, gtk_available
 
 end # module
