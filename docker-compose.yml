@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fat_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-fat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fat}
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fat} -d ${POSTGRES_DB:-fat_platform}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: { context: ./backend }
+    environment:
+      FAT_DATABASE_URL: ${FAT_DATABASE_URL:-postgresql+psycopg2://fat:fat@postgres:5432/fat_platform}
+      FAT_SIGNING_SECRET: ${FAT_SIGNING_SECRET:-change-this-secret-in-production}
+      FAT_ALGORITHM_VERSION: ${FAT_ALGORITHM_VERSION:-reconciliation-1.0.0}
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m app.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+  worker:
+    build: { context: ./backend }
+    environment:
+      FAT_DATABASE_URL: ${FAT_DATABASE_URL:-postgresql+psycopg2://fat:fat@postgres:5432/fat_platform}
+      FAT_SIGNING_SECRET: ${FAT_SIGNING_SECRET:-change-this-secret-in-production}
+      FAT_ALGORITHM_VERSION: ${FAT_ALGORITHM_VERSION:-reconciliation-1.0.0}
+    command: python -m app.workers.worker
+    depends_on:
+      postgres: { condition: service_healthy }
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes: ["./frontend:/app"]
+    command: sh -c "npm install && npm run dev"
+    ports: ["5173:5173"]
+volumes:
+  pgdata:

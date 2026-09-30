@@ -1,0 +1,22 @@
+:root { font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#17202a; background:#f5f7fa; }
+body { margin:0; }
+header { background:#10384f; color:white; padding:18px 28px; }
+header h1 { margin:0 0 4px; font-size:22px; }
+header p { margin:0; opacity:.82; font-size:13px; }
+main { padding:22px; max-width:1440px; margin:auto; }
+.grid { display:grid; grid-template-columns: 330px 1fr; gap:18px; }
+.card { background:white; border:1px solid #dfe6ee; border-radius:12px; padding:16px; box-shadow:0 1px 3px #1234 1a; }
+.card h2 { font-size:16px; margin:0 0 12px; }
+button { background:#176c87; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; margin:4px 4px 4px 0; }
+button.secondary { background:#66788a; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+input, select, textarea { width:100%; box-sizing:border-box; padding:8px; border:1px solid #b9c5cf; border-radius:8px; margin:4px 0 10px; }
+table { border-collapse:collapse; width:100%; font-size:12px; }
+th,td { border-bottom:1px solid #e5eaf0; text-align:left; padding:7px; }
+th { background:#f0f4f7; }
+.badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+.ok { background:#dff3e8; color:#146c3a; } .warn { background:#fff0ce; color:#815300; } .bad { background:#fde1e1; color:#98231f; }
+.muted { color:#66788a; font-size:12px; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+pre { white-space:pre-wrap; background:#0b1f2a; color:#d8f2ff; border-radius:8px; padding:12px; max-height:360px; overflow:auto; }
+.notice { border-left:4px solid #c47f00; background:#fff8e7; padding:10px; border-radius:6px; font-size:13px; }
