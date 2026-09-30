@@ -1,0 +1,40 @@
+# 仅运行期编排：db + api + 独立 worker。迁移： docker compose run --rm api python -m scripts.migrate
+# 种子： docker compose run --rm api python -m scripts.seed --enqueue
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: milk
+      POSTGRES_PASSWORD: milk
+      POSTGRES_DB: milkfat
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U milk"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://milk:milk@db:5432/milkfat
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8000
+    ports: ["8000:8000"]
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://milk:milk@db:5432/milkfat
+      WORKER_POLL_S: "0.5"
+    command: python -m worker.compute_worker
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
